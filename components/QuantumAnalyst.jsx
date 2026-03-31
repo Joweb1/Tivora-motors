@@ -20,8 +20,8 @@ const QuantumAnalyst = () => {
 
   useEffect(() => {
     if (isOpen && containerRef.current) {
-      gsap.fromTo(containerRef.current, 
-        { y: 50, opacity: 0, scale: 0.95 }, 
+      gsap.fromTo(containerRef.current,
+        { y: 50, opacity: 0, scale: 0.95 },
         { y: 0, opacity: 1, scale: 1, duration: 0.5, ease: "power3.out" }
       );
     }
@@ -32,18 +32,18 @@ const QuantumAnalyst = () => {
     setIsLoading(true);
     setResponse(null);
     setSources([]);
-    
+
     try {
-      const ai = new GoogleGenAI(import.meta.env.VITE_GEMINI_API_KEY);
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const result = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: query,
-        config: { 
+        config: {
           tools: [{ googleSearch: {} }],
           systemInstruction: "You are 'Tivora Intelligence', a futuristic vehicle market analyst. Provide concise, data-driven insights about cars, prices, and trends. Keep tone sleek and professional."
         },
       });
-      
+
       setResponse(result.text);
       const chunks = result.candidates?.[0]?.groundingMetadata?.groundingChunks;
       if (chunks) {
@@ -65,7 +65,7 @@ const QuantumAnalyst = () => {
       >
         <Activity className="w-5 h-5" />
       </button>
-      
+
       {isOpen && (
         <div ref={containerRef} className="fixed inset-x-4 bottom-24 md:inset-auto md:right-24 md:bottom-24 z-[1100] md:w-[450px] glass-card p-6 rounded-[2.5rem] border-accent/20 shadow-2xl flex flex-col max-h-[70vh] backdrop-blur-3xl bg-background/90">
           <div className="flex justify-between items-center mb-6 border-b border-foreground/10 pb-4">
@@ -76,7 +76,7 @@ const QuantumAnalyst = () => {
               <X className="w-4 h-4" />
             </button>
           </div>
-          
+
           <div className="flex-1 overflow-y-auto space-y-4 mb-4 custom-scrollbar pr-2">
             {isLoading ? (
               <div className="flex flex-col items-center justify-center py-12 gap-4">
@@ -109,7 +109,7 @@ const QuantumAnalyst = () => {
               </div>
             )}
           </div>
-          
+
           <div className="flex gap-2 relative">
             <input
               type="text"
@@ -119,9 +119,9 @@ const QuantumAnalyst = () => {
               onKeyDown={(e) => e.key === 'Enter' && analyze()}
               className="flex-1 bg-foreground/5 border border-foreground/10 rounded-2xl px-5 py-4 text-xs focus:outline-none focus:border-accent text-foreground placeholder:text-foreground/30 font-mono"
             />
-            <button 
-              onClick={analyze} 
-              disabled={isLoading} 
+            <button
+              onClick={analyze}
+              disabled={isLoading}
               className="bg-accent text-background p-4 rounded-2xl hover:brightness-110 transition-all disabled:opacity-50"
             >
               <Search className="w-5 h-5" />

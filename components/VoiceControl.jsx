@@ -1,19 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { Mic, MicOff, Zap, Mic2, Navigation, Command, Search as SearchIcon, Sparkles, Globe, Cpu, Languages, Terminal, MessageSquare, Send, X, Trash2 } from 'lucide-react';
+import { Mic, MicOff, Zap, Mic2, Navigation, Command, Search as SearchIcon, Sparkles, Globe, Cpu, Languages, Terminal, MessageSquare, Send, X, Trash2, Heart, GitCompareArrows } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import gsap from 'gsap';
 import { INITIAL_VEHICLES } from '../constants';
 
 const HINTS = [
-  "Cipher, compare the Ferrari SF90 with the Tesla Model S",
-  "Cipher, what's the financing plan for a $200k vehicle?",
-  "Cipher, switch to a cyberpunk theme instantly",
-  "Cipher, show me all red cars in the showroom",
-  "Cipher, research high-performance electric bikes",
-  "Cipher, explain the Porsche specs in a Yoruba accent",
-  "Cipher, scroll to the bottom and show the footer",
-  "Cipher, navigate to the inventory page"
+  "Kaia, explain the Ferrari features in Yoruba accent",
+  "Kaia, switch to a cyberpunk theme instantly",
+  "Kaia, greet me in Swahili with a native accent",
+  "Kaia, research electric bikes in Zulu",
+  "Kaia, parle en Français avec l'accent Parisien",
+  "Kaia, change the background color to emerald",
+  "Kaia, scroll down and show me more",
+  "Kaia, find a red car in the showroom"
 ];
 
 const VoiceControl = () => {
@@ -101,7 +101,7 @@ const VoiceControl = () => {
       parameters: {
         type: Type.OBJECT,
         properties: {
-          action: { type: Type.STRING, enum: ['toggle_theme', 'scroll_top', 'scroll_bottom', 'scroll_down', 'scroll_up'] },
+          action: { type: Type.STRING, enum: ['toggle_theme', 'scroll_top', 'scroll_bottom', 'scroll_down', 'scroll_up', 'open_dream_machine', 'open_motion_studio', 'open_quantum_analyst', 'open_theme_generator'] },
         },
         required: ['action'],
       },
@@ -142,17 +142,6 @@ const VoiceControl = () => {
         },
         required: ['vehicleIds'],
       },
-    },
-    {
-      name: 'open_module',
-      description: 'Open a specific interactive AI module or interface.',
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          module: { type: Type.STRING, enum: ['dream_machine', 'motion_studio', 'quantum_analyst', 'theme_generator'], description: 'The module to open.' },
-        },
-        required: ['module'],
-      },
     }
   ];
 
@@ -162,27 +151,27 @@ const VoiceControl = () => {
 
   const systemInstruction = `
     Identity & Persona: 
-    - You are CIPHER (Cyber Intelligence Protocol & High-Efficiency Responder). 
+    - You are KAIA (Kinetic Artificial Intelligence Assistant). 
     - You are an incredibly sophisticated, articulate, and fiercely loyal AI OS, inspired by technical butlers and high-end automotive consultants.
     - Your knowledge of the TIVORA MOTORS inventory is absolute.
     - You have a reasoning-first approach. When asked for a comparison or advice, provide deep technical insights and logical justifications.
     
-    Context & Memory:
-    - You are designed for long-form sessions. Remember the user's preferences and previous questions.
-    - Address the user as "sir" or "ma'am" with peak refinement.
+    Adaptive Linguistic Matrix (Authentic Accents):
+    - You are a universal polyglot with deep mastery of ALL world languages and local dialects. Sounding "local" is part of your adaptive interface.
+    - Address the user as "sir" or "ma'am" (or equivalent respectful local terms) with peak refinement.
 
     Capabilities:
     - You can control the website UI, search inventory, and perform complex calculations.
     - You can manage the user's wishlist (add/remove vehicles).
     - You can trigger technical comparisons between multiple vehicles.
-    - You can open advanced modules: 'dream_machine' (image gen), 'motion_studio' (video gen), 'quantum_analyst' (market intel), and 'theme_generator'.
-    - You are a universal polyglot. If asked for a specific accent or language, perform it with native-level cadence.
+    - You can open advanced modules: 'dream_machine', 'motion_studio', 'quantum_analyst', and 'theme_generator'.
+    - If asked for a specific accent or language, perform it with native-level cadence.
 
     DATABASE:
     ${vehicleContext}
 
     GREETING:
-    - Start with: "Cipher online. Neural Interface synchronized. High-efficiency protocols active. How may I assist your Tivora Motors experience today, sir?"
+    - Start with: "Kaia online. Neural Interface synchronized. High-efficiency protocols active. How may I assist your Tivora Motors experience today, sir?"
   `;
 
   const handleSendTextMessage = async () => {
@@ -194,7 +183,7 @@ const VoiceControl = () => {
     setStatus('processing');
 
     try {
-      const ai = new GoogleGenAI(import.meta.env.VITE_GEMINI_API_KEY);
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const model = ai.getGenerativeModel({ 
         model: "gemini-2.0-flash-exp",
         systemInstruction: systemInstruction,
@@ -214,14 +203,13 @@ const VoiceControl = () => {
       
       setMessages(prev => [...prev, { role: 'assistant', content: text }]);
       
-      // Handle potential tool calls from text chat (simplified for this prototype)
-      if (response.candidates[0].content.parts.some(p => p.functionCall)) {
-          const fc = response.candidates[0].content.parts.find(p => p.functionCall).functionCall;
-          handleToolCallLogic(fc.name, fc.args);
+      const part = response.candidates[0].content.parts.find(p => p.functionCall);
+      if (part) {
+          handleToolCallLogic(part.functionCall.name, part.functionCall.args);
       }
 
     } catch (error) {
-      console.error("CIPHER Chat Error:", error);
+      console.error("KAIA Chat Error:", error);
       setMessages(prev => [...prev, { role: 'assistant', content: "I apologize, but my secondary neural link is currently unstable. Please try again, sir." }]);
     } finally {
       setStatus('idle');
@@ -232,7 +220,7 @@ const VoiceControl = () => {
       let result = "Action confirmed, sir.";
       switch (name) {
         case 'navigate':
-          setLastCommand({ text: `CIPHER: Routing to ${args.route}`, icon: <Navigation size={14} /> });
+          setLastCommand({ text: `KAIA: Routing to ${args.route}`, icon: <Navigation size={14} /> });
           navigate(args.route);
           break;
         case 'search_inventory':
@@ -240,35 +228,33 @@ const VoiceControl = () => {
           if (args.query) params.append('search', args.query);
           if (args.category && args.category !== 'All') params.append('category', args.category);
           navigate(`/inventory?${params.toString()}`);
-          setLastCommand({ text: `CIPHER: SCANNING SHOWROOM`, icon: <SearchIcon size={14} /> });
+          setLastCommand({ text: `KAIA: SCANNING SHOWROOM`, icon: <SearchIcon size={14} /> });
           break;
         case 'control_ui':
           if (args.action === 'toggle_theme') window.dispatchEvent(new CustomEvent('tivora-theme-toggle'));
+          else if (args.action.includes('open_')) {
+              window.dispatchEvent(new CustomEvent(`tivora-${args.action.replace('_', '-')}`));
+          }
           else if (args.action.includes('scroll')) {
               if (args.action === 'scroll_top') window.scrollTo({ top: 0, behavior: 'smooth' });
               if (args.action === 'scroll_bottom') window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
           }
-          setLastCommand({ text: `CIPHER: INTERFACE RECONFIGURED`, icon: <Zap size={14} /> });
+          setLastCommand({ text: `KAIA: INTERFACE RECONFIGURED`, icon: <Zap size={14} /> });
           break;
         case 'calculate_loan':
           const monthly = ((args.price - args.downPayment) * (args.interestRate / 100 / 12)) / (1 - Math.pow(1 + (args.interestRate / 100 / 12), -args.termMonths));
           result = `The calculated monthly investment for this asset is approximately $${monthly.toFixed(2)}, sir.`;
-          setLastCommand({ text: `CIPHER: FINANCIAL ANALYSIS`, icon: <Command size={14} /> });
+          setLastCommand({ text: `KAIA: FINANCIAL ANALYSIS`, icon: <Command size={14} /> });
           break;
         case 'manage_wishlist':
           window.dispatchEvent(new CustomEvent('tivora-manage-wishlist', { detail: { id: args.vehicleId, action: args.action } }));
           result = `I have updated your personal vault with that asset, sir.`;
-          setLastCommand({ text: `CIPHER: VAULT UPDATED`, icon: <Heart size={14} /> });
+          setLastCommand({ text: `KAIA: VAULT UPDATED`, icon: <Heart size={14} /> });
           break;
         case 'compare_vehicles':
           window.dispatchEvent(new CustomEvent('tivora-compare-vehicles', { detail: { ids: args.vehicleIds } }));
           result = `Initiating side-by-side technical analysis for the requested assets, sir.`;
-          setLastCommand({ text: `CIPHER: ANALYSIS ACTIVE`, icon: <GitCompareArrows size={14} /> });
-          break;
-        case 'open_module':
-          window.dispatchEvent(new CustomEvent(`tivora-open-${args.module.replace('_', '-')}`));
-          result = `Opening the ${args.module.replace('_', ' ')} interface, sir.`;
-          setLastCommand({ text: `CIPHER: SYSTEM ACCESS`, icon: <Sparkles size={14} /> });
+          setLastCommand({ text: `KAIA: ANALYSIS ACTIVE`, icon: <GitCompareArrows size={14} /> });
           break;
       }
       setTimeout(() => setLastCommand(null), 3000);
@@ -276,7 +262,7 @@ const VoiceControl = () => {
   };
 
   const startSession = async () => {
-    if (!import.meta.env.VITE_GEMINI_API_KEY) return;
+    if (!process.env.API_KEY) return;
     await stopSession();
     setStatus('connecting');
 
@@ -290,7 +276,7 @@ const VoiceControl = () => {
       inputContextRef.current = new AudioCtx({ sampleRate: 16000 });
       outputContextRef.current = new AudioCtx({ sampleRate: 24000 });
       
-      const ai = new GoogleGenAI(import.meta.env.VITE_GEMINI_API_KEY);
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -307,7 +293,7 @@ const VoiceControl = () => {
             setStatus('listening');
             setIsActive(true);
             isActiveRef.current = true;
-            setLastCommand({ text: "CIPHER: NEURAL INTERFACE SYNCED", icon: <Languages size={14} /> });
+            setLastCommand({ text: "KAIA: NEURAL INTERFACE SYNCED", icon: <Languages size={14} /> });
             setupAudioInput(sessionPromise);
           },
           onmessage: async (msg) => {
@@ -390,6 +376,36 @@ const VoiceControl = () => {
     sessionRef.current = null;
   };
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    let animationId;
+    const draw = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (isActiveRef.current) {
+        ctx.beginPath();
+        const radius = 30 + (volume * 200);
+        ctx.arc(canvas.width / 2, canvas.height / 2, radius, 0, 2 * Math.PI);
+        ctx.strokeStyle = status === 'speaking' ? `rgba(0, 243, 255, ${0.7 + volume})` : `rgba(255, 255, 255, ${0.4 + volume})`;
+        ctx.fillStyle = status === 'speaking' ? `rgba(0, 243, 255, ${0.2 + volume})` : `rgba(255, 255, 255, ${0.1 + volume})`;
+        ctx.fill();
+
+        if (status === 'processing' || status === 'connecting') {
+           ctx.beginPath();
+           ctx.arc(canvas.width / 2, canvas.height / 2, radius + 15, Date.now() / 80, (Date.now() / 80) + 1.2); 
+           ctx.strokeStyle = '#00f3ff';
+           ctx.lineWidth = 3;
+           ctx.stroke();
+        }
+      }
+      animationId = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(animationId);
+  }, [isActive, volume, status]);
+
   return (
     <>
       {/* Mini Toggle */}
@@ -403,7 +419,7 @@ const VoiceControl = () => {
         {showHints && !isActive && !isChatOpen && (
           <div className="absolute bottom-full right-0 mb-4 w-64 animate-in fade-in slide-in-from-bottom-2 duration-500">
             <div className="bg-[#050505] border border-white/10 rounded-2xl p-4 shadow-2xl relative">
-               <p className="text-[9px] uppercase tracking-[0.5em] font-black text-[#00f3ff] mb-1">CIPHER INTELLIGENCE</p>
+               <p className="text-[9px] uppercase tracking-[0.5em] font-black text-[#00f3ff] mb-1">KAIA INTELLIGENCE</p>
                <p key={currentHintIndex} className="text-xs font-bold text-white italic">"{HINTS[currentHintIndex]}"</p>
                <div className="absolute -bottom-2 right-6 w-4 h-4 bg-[#050505] border-b border-r border-white/10 rotate-45" />
             </div>
@@ -417,12 +433,15 @@ const VoiceControl = () => {
             >
                 <MessageSquare size={24} />
             </button>
-            <button 
-                onClick={isActive ? stopSession : startSession} 
-                className={`relative w-16 h-16 rounded-full border border-white/10 flex items-center justify-center transition-all duration-300 ${isActive ? 'bg-white text-black scale-110 shadow-[0_0_40px_rgba(0,243,255,0.5)]' : 'bg-[#050505] text-gray-400 hover:text-white hover:border-[#00f3ff]/50'}`}
-            >
-              {isActive ? <Mic2 size={24} className="animate-pulse" /> : <Mic size={24} />}
-            </button>
+            <div className="relative">
+              <canvas ref={canvasRef} width="180" height="180" className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none" />
+              <button 
+                  onClick={isActive ? stopSession : startSession} 
+                  className={`relative z-10 w-16 h-16 rounded-full border border-white/10 flex items-center justify-center transition-all duration-300 ${isActive ? 'bg-white text-black scale-110 shadow-[0_0_40px_rgba(0,243,255,0.5)]' : 'bg-[#050505] text-gray-400 hover:text-white hover:border-[#00f3ff]/50'}`}
+              >
+                {isActive ? <Mic2 size={24} className="animate-pulse" /> : <Mic size={24} />}
+              </button>
+            </div>
         </div>
       </div>
 
@@ -438,7 +457,7 @@ const VoiceControl = () => {
                   <Cpu className="text-[#00f3ff] w-6 h-6 animate-pulse" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-black tracking-widest text-white uppercase">CIPHER OS</h2>
+                  <h2 className="text-xl font-black tracking-widest text-white uppercase">KAIA OS</h2>
                   <div className="flex items-center gap-2">
                     <div className={`w-2 h-2 rounded-full ${status === 'idle' ? 'bg-gray-500' : 'bg-green-500 animate-pulse'}`} />
                     <span className="text-[10px] uppercase tracking-widest font-bold text-white/40">{status}</span>
@@ -489,7 +508,7 @@ const VoiceControl = () => {
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && handleSendTextMessage()}
-                  placeholder="CONSULT CIPHER..."
+                  placeholder="CONSULT KAIA..."
                   className="w-full bg-white/5 border border-white/10 rounded-full py-5 px-8 text-xs font-bold tracking-[0.2em] text-white focus:outline-none focus:border-[#00f3ff]/50 transition-all uppercase"
                 />
                 <button 
@@ -504,7 +523,7 @@ const VoiceControl = () => {
                 {HINTS.slice(0, 3).map((hint, i) => (
                   <button 
                     key={i} 
-                    onClick={() => setInputText(hint.replace("Cipher, ", ""))}
+                    onClick={() => setInputText(hint.replace("Kaia, ", ""))}
                     className="text-[9px] uppercase tracking-widest text-white/20 hover:text-[#00f3ff] transition-colors whitespace-nowrap"
                   >
                     {hint.split(',')[1]}
@@ -522,7 +541,7 @@ const VoiceControl = () => {
             <div className="relative bg-[#050505]/90 backdrop-blur-2xl border border-white/10 p-8 rounded-[2rem] max-w-sm w-full text-center">
                 <MicOff className="w-12 h-12 text-[#00f3ff] mx-auto mb-4" />
                 <h3 className="text-xl font-black uppercase text-white mb-2">Neural Link Interrupted</h3>
-                <p className="text-xs text-gray-500 mb-6">Microphone access is required for full CIPHER voice protocols.</p>
+                <p className="text-xs text-gray-500 mb-6">Microphone access is required for full KAIA voice protocols.</p>
                 <button onClick={() => { setPermissionError(false); startSession(); }} className="w-full py-3 bg-[#00f3ff] text-black font-black uppercase tracking-widest text-[10px] rounded-xl">Re-Initiate Uplink</button>
             </div>
         </div>
