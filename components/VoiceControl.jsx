@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Mic, MicOff, Volume2, VolumeX, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI, Modality } from "@google/genai";
 import { GEMINI_API_KEY } from '../lib/firebase';
 
 const VoiceControl = ({ 
@@ -14,6 +14,12 @@ const VoiceControl = ({
   const [status, setStatus] = useState('offline'); // offline, connecting, listening, speaking
   const [isActive, setIsActive] = useState(false);
   const isAutoWelcomeStarted = useRef(false);
+
+  // Sync status to ref to avoid stale closures in audio processing
+  const statusRef = useRef(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     if (isPermissionGranted && !isActive && !isAutoWelcomeStarted.current) {
@@ -37,12 +43,12 @@ const VoiceControl = ({
 
   // Audio Refs
   const audioContextRef = useRef(null);
-  const inputContextRef = useRef(null);
   const streamRef = useRef(null);
   const sourceRef = useRef(null);
   const processorRef = useRef(null);
   const outputContextRef = useRef(null);
   const nextStartTimeRef = useRef(0);
+  const isWorkletLoadedRef = useRef(false);
   
   // Gemini Refs
   const sessionRef = useRef(null);
@@ -68,21 +74,18 @@ const VoiceControl = ({
     if (!ctx) return;
 
     try {
-      // 1. Decode Base64 to Binary
       const binaryString = atob(base64String);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
 
-      // 2. Convert to Int16 then Float32
       const dataInt16 = new Int16Array(bytes.buffer);
       const float32Data = new Float32Array(dataInt16.length);
       for (let i = 0; i < dataInt16.length; i++) {
         float32Data[i] = dataInt16[i] / 32768.0;
       }
 
-      // 3. Create a buffer and play it
       const audioBuffer = ctx.createBuffer(1, float32Data.length, 24000);
       audioBuffer.getChannelData(0).set(float32Data);
       
@@ -90,7 +93,6 @@ const VoiceControl = ({
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
       
-      // Ensure smooth playback
       const startTime = Math.max(nextStartTimeRef.current, ctx.currentTime);
       source.start(startTime);
       nextStartTimeRef.current = startTime + audioBuffer.duration;
@@ -102,7 +104,7 @@ const VoiceControl = ({
         }
       };
     } catch (err) {
-      console.error('Playback Error:', err);
+      console.error('CIPHER Playback Error:', err);
     }
   };
 
@@ -111,7 +113,6 @@ const VoiceControl = ({
     
     const ctx = audioContextRef.current;
     
-    // Modern AudioWorklet instead of deprecated ScriptProcessor
     if (!isWorkletLoadedRef.current) {
       const workletCode = `
         class PCMProcessor extends AudioWorkletProcessor {
@@ -137,8 +138,8 @@ const VoiceControl = ({
     processorRef.current = new AudioWorkletNode(ctx, 'pcm-processor');
     
     processorRef.current.port.onmessage = (e) => {
-      // Only send if we are actively listening and setup is complete
-      if (session && session.readyState === WebSocket.OPEN && status === 'listening') {
+      // Aggressive check: must be listening and session must exist
+      if (statusRef.current === 'listening' && sessionRef.current) {
         const inputData = e.data;
         const int16 = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
@@ -147,14 +148,13 @@ const VoiceControl = ({
         
         const b64 = btoa(String.fromCharCode(...new Uint8Array(int16.buffer)));
 
-        session.send(JSON.stringify({
-          realtimeInput: {
-            mediaChunks: [{
-              mimeType: 'audio/pcm;rate=16000',
-              data: b64
-            }]
-          }
-        }));
+        try {
+          sessionRef.current.sendRealtimeInput({
+            audio: { data: b64, mimeType: 'audio/pcm;rate=16000' }
+          });
+        } catch (err) {
+          // Quietly catch any remaining racing socket errors
+        }
       }
     };
 
@@ -162,131 +162,142 @@ const VoiceControl = ({
     processorRef.current.connect(ctx.destination);
   };
 
+  const cleanupResources = useCallback(() => {
+    // Immediate signal to stop all processing
+    statusRef.current = 'offline';
+    setStatus('offline');
+
+    if (sessionRef.current) {
+      try {
+        sessionRef.current.close();
+      } catch (e) {}
+      sessionRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (processorRef.current) {
+      processorRef.current.port.onmessage = null; // Kill the listener first
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
+  }, []);
+
   const startSession = async (mode = 'interactive') => {
     setStatus('connecting');
     try {
       await initAudio();
       
-      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
       
-      const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
-      const ws = new WebSocket(url);
-      sessionRef.current = ws;
-
-      ws.onopen = async () => {
-        // Send setup message
-        const setup = {
-          setup: {
-            model: 'models/gemini-2.0-flash-exp',
-            generationConfig: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
+      const session = await ai.live.connect({
+        model: "gemini-2.0-flash-exp",
+        callbacks: {
+          onopen: async () => {
+            console.log('CIPHER Uplink: Protocol Synchronized');
+            setTimeout(async () => {
+              if (sessionRef.current) {
+                await setupAudioInput(sessionRef.current);
+                setStatus('listening');
               }
-            },
-            systemInstruction: {
-              parts: [{ text: `You are CIPHER OS, the high-tech AI interface for Tivora Motors. You are sleek, professional, and efficient. 
-              You can control the interface using tools.
-              Site Structure:
-              - Home: Featured luxury vehicles and brand highlights.
-              - Inventory (or Showroom): The full list of available vehicles.
-              - About: Our mission and legacy.
-              - Contact: Get in touch.
-              - Dashboard: User profile and saved vehicles.
-              - Cart: The checkout area for vehicle reservations.
-              
-              Navigation Logic:
-              - If the user says 'showroom', 'cars', or 'stock', navigate to 'inventory'.
-              - If they say 'profile' or 'account', navigate to 'dashboard'.
-              - If they want to see their saved cars or purchases, navigate to 'cart'.
-              
-              Behavior:
-              - Be concise.
-              - Use futuristic, automotive terminology.
-              ${mode === 'welcome' ? 'This is a secure link initialization. Greet the user with "Secure link established. CIPHER OS online." and invite them to explore the showroom.' : ''}` }]
-            },
-            tools: [{
-              functionDeclarations: [
-                {
-                  name: "navigate",
-                  description: "Navigate to different sections of the website",
-                  parameters: {
-                    type: "OBJECT",
-                    properties: {
-                      section: { type: "STRING", enum: ["home", "inventory", "about", "contact", "dashboard", "cart"] }
-                    },
-                    required: ["section"]
-                  }
-                },
-                {
-                  name: "toggle_theme",
-                  description: "Toggle between light and dark mode"
-                },
-                {
-                  name: "open_assistant",
-                  description: "Open the text-based AI chat assistant"
-                }
-              ]
-            }]
-          }
-        };
-        ws.send(JSON.stringify(setup));
-        
-        // Wait for setup to be acknowledged by the server before setting status to listening
-        setTimeout(() => {
-          setStatus('listening');
-        }, 500);
+            }, 10);
+          },
+          onmessage: async (message) => {
+            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (base64Audio) await playAudio(base64Audio);
 
-        await setupAudioInput(ws);
-      };
+            const functionCall = message.serverContent?.modelTurn?.parts?.[0]?.functionCall;
+            if (functionCall) handleToolCall(functionCall, session);
 
-      ws.onmessage = async (event) => {
-        try {
-          let data = event.data;
-          if (data instanceof Blob) {
-            data = await data.text();
+            if (message.serverContent?.interrupted) console.log('CIPHER Interrupted');
+          },
+          onclose: (e) => {
+            console.log('CIPHER Uplink Closed:', e);
+            cleanupResources();
+            setIsActive(false);
+          },
+          onerror: (err) => {
+            console.error('CIPHER Uplink Error:', err);
+            setStatus('error');
+            setTimeout(() => {
+               if (statusRef.current === 'error') setIsActive(false);
+            }, 4000);
           }
-          const response = JSON.parse(data);
+        },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+          },
+          systemInstruction: `You are CIPHER OS, the high-tech AI interface for Tivora Motors. You are sleek, professional, and efficient. 
+          You can control the interface using tools.
+          Site Structure:
+          - Home: Featured luxury vehicles and brand highlights.
+          - Inventory: The full list of available vehicles.
+          - About: Our mission and legacy.
+          - Contact: Get in touch.
+          - Dashboard: User profile and saved vehicles.
+          - Cart: The checkout area for vehicle reservations.
           
-          if (response.serverContent?.modelTurn?.parts) {
-            const parts = response.serverContent.modelTurn.parts;
-            for (const part of parts) {
-              if (part.inlineData) {
-                await playAudio(part.inlineData.data);
+          Navigation Logic:
+          - If the user says 'showroom', 'cars', or 'stock', navigate to 'inventory'.
+          - If they say 'profile' or 'account', navigate to 'dashboard'.
+          - If they want to see their saved cars or purchases, navigate to 'cart'.
+          
+          Behavior:
+          - Be concise.
+          - Use futuristic, automotive terminology.
+          ${mode === 'welcome' ? 'Initial link established. Greet the user with "CIPHER OS online. Ready for command." and invite exploration.' : ''}`,
+          tools: [{
+            functionDeclarations: [
+              {
+                name: "navigate",
+                description: "Navigate to different sections of the website",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    section: { type: "STRING", enum: ["home", "inventory", "about", "contact", "dashboard", "cart"] }
+                  },
+                  required: ["section"]
+                }
+              },
+              {
+                name: "toggle_theme",
+                description: "Toggle between light and dark mode"
+              },
+              {
+                name: "open_assistant",
+                description: "Open the text-based AI chat assistant"
               }
-              if (part.functionCall) {
-                handleToolCall(part.functionCall, ws);
-              }
-            }
-          }
-        } catch (err) {
-          console.error('Message Parsing Error:', err, event.data);
-        }
-      };
+            ]
+          }]
+        },
+      });
 
-      ws.onerror = (err) => {
-        console.error('WS Error:', err);
-        setStatus('offline');
-      };
-
-      ws.onclose = () => {
-        setStatus('offline');
-        setIsActive(false);
-      };
-
+      sessionRef.current = session;
     } catch (err) {
-      console.error('Failed to start session:', err);
-      setStatus('offline');
+      console.error('CIPHER Session Initiation Failed:', err);
+      setStatus('error');
     }
   };
 
-  const handleToolCall = (call, ws) => {
-    const { name, args } = call;
+  const handleToolCall = (call, session) => {
+    const { name, args, callId } = call;
     let result = { success: true };
+
+    console.log('CIPHER Tool Call:', name, args);
 
     switch (name) {
       case 'navigate':
-        onNavigate(args.section);
+        if (args.section) onNavigate(args.section);
         break;
       case 'toggle_theme':
         onToggleTheme();
@@ -295,34 +306,21 @@ const VoiceControl = ({
         onOpenChat();
         break;
       default:
-        result = { error: 'Unknown tool' };
+        result = { error: 'Unknown protocol command' };
     }
 
-    // Send tool response back
-    ws.send(JSON.stringify({
-      tool_response: {
-        function_responses: [{
-          name,
-          response: { result }
-        }]
-      }
-    }));
+    session.sendToolResponse({
+      functionResponses: [{
+        name,
+        response: { result },
+        id: callId
+      }]
+    });
   };
 
   const stopSession = () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-    }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-    }
-    if (sourceRef.current) {
-      sourceRef.current.disconnect();
-    }
-    setStatus('offline');
+    cleanupResources();
+    setIsActive(false);
   };
 
   const toggleVoice = () => {
@@ -372,7 +370,8 @@ const VoiceControl = ({
                 <p className="text-[14px] font-black text-white uppercase tracking-tighter leading-none italic">
                   {status === 'connecting' ? 'Establishing...' : 
                    status === 'listening' ? 'Secure Link' : 
-                   status === 'speaking' ? 'Transmitting' : 'Standby'}
+                   status === 'speaking' ? 'Transmitting' : 
+                   status === 'error' ? 'Uplink Error' : 'Standby'}
                 </p>
               </div>
             </div>
@@ -382,16 +381,20 @@ const VoiceControl = ({
                 <p className="text-[11px] font-medium text-white/80">
                   {status === 'connecting' ? 'Neural handshake in progress' :
                    status === 'listening' ? 'Awaiting voice command' :
-                   status === 'speaking' ? 'Data stream active' : 'Link offline'}
+                   status === 'speaking' ? 'Data stream active' : 
+                   status === 'error' ? 'Protocol failed. Restarting...' : 'Link offline'}
                 </p>
-                <div className={`w-2 h-2 rounded-full ${status === 'listening' ? 'bg-emerald-500 shadow-[0_0_100px_#10b981]' : 'bg-white/10'}`} />
+                <div className={`w-2 h-2 rounded-full ${
+                  status === 'listening' ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 
+                  status === 'error' ? 'bg-red-500 shadow-[0_0_10px_#ef4444]' : 'bg-white/10'
+                }`} />
               </div>
               <div className="w-full h-[1px] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
               <div className="flex justify-between items-center text-[9px] font-mono text-white/30 uppercase tracking-widest">
                 <span>Model: Kore-v2.5</span>
                 <span className="flex items-center gap-1">
-                  <span className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
-                  Live
+                  <span className={`w-1 h-1 rounded-full animate-pulse ${status === 'error' ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                  {status === 'error' ? 'Offline' : 'Live'}
                 </span>
               </div>
             </div>
@@ -408,12 +411,12 @@ const VoiceControl = ({
         whileTap={{ scale: 0.95 }}
         className={`pointer-events-auto p-4 rounded-full shadow-2xl transition-all duration-500 flex items-center justify-center border ring-1 ${
           isActive 
-            ? 'bg-white border-white text-black ring-white/20' 
+            ? status === 'error' ? 'bg-red-500/20 border-red-500 text-red-500 ring-red-500/20' : 'bg-white border-white text-black ring-white/20' 
             : 'bg-black/80 backdrop-blur-md border-white/10 text-white ring-white/5'
         }`}
       >
-        {status === 'connecting' ? (
-          <Loader2 className="animate-spin" size={24} />
+        {status === 'connecting' || status === 'error' ? (
+          <Loader2 className={`animate-spin ${status === 'error' ? 'text-red-500' : ''}`} size={24} />
         ) : isActive ? (
           status === 'speaking' ? <Volume2 size={24} /> : <Mic size={24} />
         ) : (
