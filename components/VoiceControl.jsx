@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Mic, MicOff, Volume2, VolumeX, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { GoogleGenAI, Modality } from "@google/genai";
 import { GEMINI_API_KEY } from '../lib/firebase';
 
 const VoiceControl = ({ 
@@ -42,7 +43,6 @@ const VoiceControl = ({
 
   // Audio Refs
   const audioContextRef = useRef(null);
-  const inputContextRef = useRef(null);
   const streamRef = useRef(null);
   const sourceRef = useRef(null);
   const processorRef = useRef(null);
@@ -74,21 +74,18 @@ const VoiceControl = ({
     if (!ctx) return;
 
     try {
-      // 1. Decode Base64 to Binary
       const binaryString = atob(base64String);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
 
-      // 2. Convert to Int16 then Float32
       const dataInt16 = new Int16Array(bytes.buffer);
       const float32Data = new Float32Array(dataInt16.length);
       for (let i = 0; i < dataInt16.length; i++) {
         float32Data[i] = dataInt16[i] / 32768.0;
       }
 
-      // 3. Create a buffer and play it
       const audioBuffer = ctx.createBuffer(1, float32Data.length, 24000);
       audioBuffer.getChannelData(0).set(float32Data);
       
@@ -96,7 +93,6 @@ const VoiceControl = ({
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
       
-      // Ensure smooth playback
       const startTime = Math.max(nextStartTimeRef.current, ctx.currentTime);
       source.start(startTime);
       nextStartTimeRef.current = startTime + audioBuffer.duration;
@@ -108,7 +104,7 @@ const VoiceControl = ({
         }
       };
     } catch (err) {
-      console.error('Playback Error:', err);
+      console.error('CIPHER Playback Error:', err);
     }
   };
 
@@ -117,7 +113,6 @@ const VoiceControl = ({
     
     const ctx = audioContextRef.current;
     
-    // Modern AudioWorklet instead of deprecated ScriptProcessor
     if (!isWorkletLoadedRef.current) {
       const workletCode = `
         class PCMProcessor extends AudioWorkletProcessor {
@@ -143,8 +138,8 @@ const VoiceControl = ({
     processorRef.current = new AudioWorkletNode(ctx, 'pcm-processor');
     
     processorRef.current.port.onmessage = (e) => {
-      // Only send if we are actively listening and setup is complete
-      if (session && session.readyState === WebSocket.OPEN && statusRef.current === 'listening') {
+      // Aggressive check: must be listening and session must exist
+      if (statusRef.current === 'listening' && sessionRef.current) {
         const inputData = e.data;
         const int16 = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
@@ -153,14 +148,13 @@ const VoiceControl = ({
         
         const b64 = btoa(String.fromCharCode(...new Uint8Array(int16.buffer)));
 
-        session.send(JSON.stringify({
-          realtimeInput: {
-            mediaChunks: [{
-              mimeType: 'audio/pcm;rate=16000',
-              data: b64
-            }]
-          }
-        }));
+        try {
+          sessionRef.current.sendRealtimeInput({
+            audio: { data: b64, mimeType: 'audio/pcm;rate=16000' }
+          });
+        } catch (err) {
+          // Quietly catch any remaining racing socket errors
+        }
       }
     };
 
@@ -168,148 +162,134 @@ const VoiceControl = ({
     processorRef.current.connect(ctx.destination);
   };
 
+  const cleanupResources = useCallback(() => {
+    // Immediate signal to stop all processing
+    statusRef.current = 'offline';
+    setStatus('offline');
+
+    if (sessionRef.current) {
+      try {
+        sessionRef.current.close();
+      } catch (e) {}
+      sessionRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (processorRef.current) {
+      processorRef.current.port.onmessage = null; // Kill the listener first
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
+  }, []);
+
   const startSession = async (mode = 'interactive') => {
     setStatus('connecting');
     try {
       await initAudio();
       
-      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
       
-      const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
-      const ws = new WebSocket(url);
-      sessionRef.current = ws;
+      const session = await ai.live.connect({
+        model: "gemini-2.0-flash-exp",
+        callbacks: {
+          onopen: async () => {
+            console.log('CIPHER Uplink: Protocol Synchronized');
+            setTimeout(async () => {
+              if (sessionRef.current) {
+                await setupAudioInput(sessionRef.current);
+                setStatus('listening');
+              }
+            }, 10);
+          },
+          onmessage: async (message) => {
+            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (base64Audio) await playAudio(base64Audio);
 
-      ws.onopen = async () => {
-        console.log('CIPHER Uplink: Connection Established');
-        try {
-          if (!GEMINI_API_KEY) {
-            throw new Error('Intelligence key missing. Protocol halted.');
+            const functionCall = message.serverContent?.modelTurn?.parts?.[0]?.functionCall;
+            if (functionCall) handleToolCall(functionCall, session);
+
+            if (message.serverContent?.interrupted) console.log('CIPHER Interrupted');
+          },
+          onclose: (e) => {
+            console.log('CIPHER Uplink Closed:', e);
+            cleanupResources();
+            setIsActive(false);
+          },
+          onerror: (err) => {
+            console.error('CIPHER Uplink Error:', err);
+            setStatus('error');
+            setTimeout(() => {
+               if (statusRef.current === 'error') setIsActive(false);
+            }, 4000);
           }
-
-          // Send setup message strictly following Gemini 2.0 Bidi protocol
-          const setup = {
-            setup: {
-              model: 'models/gemini-2.0-flash-exp',
-              generationConfig: {
-                responseModalities: ['AUDIO'],
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
+        },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+          },
+          systemInstruction: `You are CIPHER OS, the high-tech AI interface for Tivora Motors. You are sleek, professional, and efficient. 
+          You can control the interface using tools.
+          Site Structure:
+          - Home: Featured luxury vehicles and brand highlights.
+          - Inventory: The full list of available vehicles.
+          - About: Our mission and legacy.
+          - Contact: Get in touch.
+          - Dashboard: User profile and saved vehicles.
+          - Cart: The checkout area for vehicle reservations.
+          
+          Navigation Logic:
+          - If the user says 'showroom', 'cars', or 'stock', navigate to 'inventory'.
+          - If they say 'profile' or 'account', navigate to 'dashboard'.
+          - If they want to see their saved cars or purchases, navigate to 'cart'.
+          
+          Behavior:
+          - Be concise.
+          - Use futuristic, automotive terminology.
+          ${mode === 'welcome' ? 'Initial link established. Greet the user with "CIPHER OS online. Ready for command." and invite exploration.' : ''}`,
+          tools: [{
+            functionDeclarations: [
+              {
+                name: "navigate",
+                description: "Navigate to different sections of the website",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    section: { type: "STRING", enum: ["home", "inventory", "about", "contact", "dashboard", "cart"] }
+                  },
+                  required: ["section"]
                 }
               },
-              systemInstruction: {
-                parts: [{ text: `You are CIPHER OS, the high-tech AI interface for Tivora Motors. You are sleek, professional, and efficient. 
-                You can control the interface using tools.
-                Site Structure:
-                - Home: Featured luxury vehicles and brand highlights.
-                - Inventory: The full list of available vehicles.
-                - About: Our mission and legacy.
-                - Contact: Get in touch.
-                - Dashboard: User profile and saved vehicles.
-                - Cart: The checkout area for vehicle reservations.
-                
-                Navigation Logic:
-                - If the user says 'showroom', 'cars', or 'stock', navigate to 'inventory'.
-                - If they say 'profile' or 'account', navigate to 'dashboard'.
-                - If they want to see their saved cars or purchases, navigate to 'cart'.
-                
-                Behavior:
-                - Be concise.
-                - Use futuristic, automotive terminology.
-                ${mode === 'welcome' ? 'Initial link established. Greet the user with "CIPHER OS online. Ready for command." and invite exploration.' : ''}` }]
+              {
+                name: "toggle_theme",
+                description: "Toggle between light and dark mode"
               },
-              tools: [{
-                functionDeclarations: [
-                  {
-                    name: "navigate",
-                    description: "Navigate to different sections of the website",
-                    parameters: {
-                      type: "OBJECT",
-                      properties: {
-                        section: { type: "STRING", enum: ["home", "inventory", "about", "contact", "dashboard", "cart"] }
-                      },
-                      required: ["section"]
-                    }
-                  },
-                  {
-                    name: "toggle_theme",
-                    description: "Toggle between light and dark mode"
-                  },
-                  {
-                    name: "open_assistant",
-                    description: "Open the text-based AI chat assistant"
-                  }
-                ]
-              }]
-            }
-          };
-          ws.send(JSON.stringify(setup));
-          
-          // Audio input setup
-          await setupAudioInput(ws);
-          
-          // Only transition to listening after setup and audio are ready
-          setTimeout(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              setStatus('listening');
-            }
-          }, 800);
-
-        } catch (err) {
-          console.error('CIPHER Setup Error:', err);
-          setStatus('error');
-          // Don't immediately deactivate, let the user see the error state
-          setTimeout(() => {
-             if (statusRef.current === 'error') setIsActive(false);
-          }, 4000);
-        }
-      };
-
-      ws.onmessage = async (event) => {
-        try {
-          let data = event.data;
-          if (data instanceof Blob) {
-            data = await data.text();
-          }
-          const response = JSON.parse(data);
-          
-          if (response.setupComplete) {
-            console.log('CIPHER Uplink: Protocol Synchronized');
-          }
-
-          if (response.serverContent?.modelTurn?.parts) {
-            const parts = response.serverContent.modelTurn.parts;
-            for (const part of parts) {
-              if (part.inlineData) {
-                await playAudio(part.inlineData.data);
+              {
+                name: "open_assistant",
+                description: "Open the text-based AI chat assistant"
               }
-              if (part.functionCall) {
-                handleToolCall(part.functionCall, ws);
-              }
-            }
-          }
-        } catch (err) {
-          console.error('CIPHER Signal Error:', err);
-        }
-      };
+            ]
+          }]
+        },
+      });
 
-      ws.onerror = (err) => {
-        console.error('CIPHER Uplink Error:', err);
-        setStatus('error');
-      };
-
-      ws.onclose = (e) => {
-        console.log('CIPHER Uplink Closed:', e.code, e.reason);
-        if (statusRef.current !== 'error') setStatus('offline');
-        setIsActive(false);
-      };
-
+      sessionRef.current = session;
     } catch (err) {
-      console.error('Failed to start session:', err);
+      console.error('CIPHER Session Initiation Failed:', err);
       setStatus('error');
     }
   };
 
-  const handleToolCall = (call, ws) => {
+  const handleToolCall = (call, session) => {
     const { name, args, callId } = call;
     let result = { success: true };
 
@@ -329,32 +309,18 @@ const VoiceControl = ({
         result = { error: 'Unknown protocol command' };
     }
 
-    // Send tool response back in the correct format for Bidi
-    ws.send(JSON.stringify({
-      toolResponse: {
-        functionResponses: [{
-          name,
-          response: { result },
-          id: callId
-        }]
-      }
-    }));
+    session.sendToolResponse({
+      functionResponses: [{
+        name,
+        response: { result },
+        id: callId
+      }]
+    });
   };
 
   const stopSession = () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-    }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-    }
-    if (sourceRef.current) {
-      sourceRef.current.disconnect();
-    }
-    setStatus('offline');
+    cleanupResources();
+    setIsActive(false);
   };
 
   const toggleVoice = () => {
